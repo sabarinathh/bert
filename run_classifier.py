@@ -127,7 +127,7 @@ flags.DEFINE_integer(
 class InputExample(object):
   """A single training/test example for simple sequence classification."""
 
-  def __init__(self, guid, text_a, text_b=None, label=None):
+  def __init__(self, guid, text_a, text_b=None, label=None, sample_weight=None):
     """Constructs a InputExample.
 
     Args:
@@ -143,6 +143,7 @@ class InputExample(object):
     self.text_a = text_a
     self.text_b = text_b
     self.label = label
+    self.sample_weight = sample_weight
 
 
 class PaddingInputExample(object):
@@ -165,13 +166,15 @@ class InputFeatures(object):
                input_ids,
                input_mask,
                segment_ids,
-               label_id,
-               is_real_example=True):
+               label_ids,
+               is_real_example=True, 
+               sample_weight):
     self.input_ids = input_ids
     self.input_mask = input_mask
     self.segment_ids = segment_ids
-    self.label_id = label_id
+    self.label_ids = label_ids
     self.is_real_example = is_real_example
+    self.sample_weight = sample_weight
 
 
 class DataProcessor(object):
@@ -406,16 +409,18 @@ class ToxicityProcessor(DataProcessor):
       if set_type == "test":
         text_a = tokenization.convert_to_unicode(line[1])
         label = "0"
+        sample_weight = "1"
       else:
-        text_a = tokenization.convert_to_unicode(line[3])
-        label = tokenization.convert_to_unicode(line[1])
+        text_a = tokenization.convert_to_unicode(line[1])
+        label = tokenization.convert_to_unicode(line[2])
+        sample_weight = tokenization.convert_to_unicode(line[3])
       examples.append(
-          InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
+          InputExample(guid=guid, text_a=text_a, text_b=None, label=label, sample_weight=sample_weight))
     return examples
 
 
 def convert_single_example(ex_index, example, label_list, max_seq_length,
-                           tokenizer):
+                           tokenizer, n_classes):
   """Converts a single `InputExample` into a single `InputFeatures`."""
 
   if isinstance(example, PaddingInputExample):
@@ -423,8 +428,9 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
         input_ids=[0] * max_seq_length,
         input_mask=[0] * max_seq_length,
         segment_ids=[0] * max_seq_length,
-        label_id=0,
-        is_real_example=False)
+        label_ids=[0] * n_classes,
+        is_real_example=False,
+        sample_weight=1)
 
   label_map = {}
   for (i, label) in enumerate(label_list):
@@ -496,7 +502,7 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
   assert len(input_mask) == max_seq_length
   assert len(segment_ids) == max_seq_length
 
-  label_id = label_map[example.label]
+  label_ids = [label_map[_label] for _label in example.label]
   if ex_index < 5:
     tf.logging.info("*** Example ***")
     tf.logging.info("guid: %s" % (example.guid))
@@ -505,14 +511,16 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
     tf.logging.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
     tf.logging.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
     tf.logging.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-    tf.logging.info("label: %s (id = %d)" % (example.label, label_id))
+    tf.logging.info("(label_ids = %s)" % (" ".join([str(x) for x in label_ids]))
+    tf.logging.info("sample_weight: %f" % (sample_weight))
 
   feature = InputFeatures(
       input_ids=input_ids,
       input_mask=input_mask,
       segment_ids=segment_ids,
-      label_id=label_id,
-      is_real_example=True)
+      label_ids=label_ids,
+      is_real_example=True,
+      sample_weight=sample_weight)
   return feature
 
 
@@ -537,7 +545,7 @@ def file_based_convert_examples_to_features(
     features["input_ids"] = create_int_feature(feature.input_ids)
     features["input_mask"] = create_int_feature(feature.input_mask)
     features["segment_ids"] = create_int_feature(feature.segment_ids)
-    features["label_ids"] = create_int_feature([feature.label_id])
+    features["label_ids"] = create_int_feature([feature.label_ids])
     features["is_real_example"] = create_int_feature(
         [int(feature.is_real_example)])
 
@@ -547,14 +555,14 @@ def file_based_convert_examples_to_features(
 
 
 def file_based_input_fn_builder(input_file, seq_length, is_training,
-                                drop_remainder):
+                                drop_remainder, n_classes):
   """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
   name_to_features = {
       "input_ids": tf.FixedLenFeature([seq_length], tf.int64),
       "input_mask": tf.FixedLenFeature([seq_length], tf.int64),
       "segment_ids": tf.FixedLenFeature([seq_length], tf.int64),
-      "label_ids": tf.FixedLenFeature([], tf.int64),
+      "label_ids": tf.FixedLenFeature([n_classes], tf.int64),
       "is_real_example": tf.FixedLenFeature([], tf.int64),
   }
 
@@ -648,9 +656,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
     probabilities = tf.nn.sigmoid(logits)
     log_probs = tf.log(logits)
 
-    one_hot_labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)
-
-    per_example_loss = -tf.reduce_sum(one_hot_labels * probabilities, axis=-1)
+    per_example_loss = -tf.reduce_sum(labels * probabilities, axis=-1)
     per_example_loss = per_example_loss * sample_weights
     loss = tf.reduce_mean(per_example_loss)
 
