@@ -168,7 +168,7 @@ class InputFeatures(object):
                segment_ids,
                label_ids,
                is_real_example=True, 
-               sample_weight):
+               sample_weight=1.0):
     self.input_ids = input_ids
     self.input_mask = input_mask
     self.segment_ids = segment_ids
@@ -396,7 +396,7 @@ class ToxicityProcessor(DataProcessor):
 
   def get_labels(self):
     """See base class."""
-    return ['target', 'severe_toxicity', 'obscene', 'identity_attack', 'insult', 'threat']
+    return ["0", "1"]
 
   def _create_examples(self, lines, set_type):
     """Creates examples for the training and dev sets."""
@@ -420,7 +420,7 @@ class ToxicityProcessor(DataProcessor):
 
 
 def convert_single_example(ex_index, example, label_list, max_seq_length,
-                           tokenizer, n_classes):
+                           tokenizer, n_labels):
   """Converts a single `InputExample` into a single `InputFeatures`."""
 
   if isinstance(example, PaddingInputExample):
@@ -428,7 +428,7 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
         input_ids=[0] * max_seq_length,
         input_mask=[0] * max_seq_length,
         segment_ids=[0] * max_seq_length,
-        label_ids=[0] * n_classes,
+        label_ids=[0] * n_labels,
         is_real_example=False,
         sample_weight=1)
 
@@ -503,6 +503,7 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
   assert len(segment_ids) == max_seq_length
 
   label_ids = [label_map[_label] for _label in example.label]
+  sample_weight = float(example.sample_weight)
   if ex_index < 5:
     tf.logging.info("*** Example ***")
     tf.logging.info("guid: %s" % (example.guid))
@@ -511,8 +512,8 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
     tf.logging.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
     tf.logging.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
     tf.logging.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-    tf.logging.info("(label_ids = %s)" % (" ".join([str(x) for x in label_ids]))
-    tf.logging.info("sample_weight: %f" % (sample_weight))
+    tf.logging.info("label_ids = %s" % " ".join([str(x) for x in label_ids]))
+    tf.logging.info("sample_weight: %f" % sample_weight)
 
   feature = InputFeatures(
       input_ids=input_ids,
@@ -525,7 +526,7 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
 
 
 def file_based_convert_examples_to_features(
-    examples, label_list, max_seq_length, tokenizer, output_file):
+    examples, label_list, max_seq_length, tokenizer, output_file, n_labels):
   """Convert a set of `InputExample`s to a TFRecord file."""
 
   writer = tf.python_io.TFRecordWriter(output_file)
@@ -535,7 +536,7 @@ def file_based_convert_examples_to_features(
       tf.logging.info("Writing example %d of %d" % (ex_index, len(examples)))
 
     feature = convert_single_example(ex_index, example, label_list,
-                                     max_seq_length, tokenizer)
+                                     max_seq_length, tokenizer, n_labels)
 
     def create_int_feature(values):
       f = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
@@ -817,7 +818,7 @@ def input_fn_builder(features, seq_length, is_training, drop_remainder):
 # This function is not used by this file but is still used by the Colab and
 # people who depend on it.
 def convert_examples_to_features(examples, label_list, max_seq_length,
-                                 tokenizer):
+                                 tokenizer, n_labels):
   """Convert a set of `InputExample`s to a list of `InputFeatures`."""
 
   features = []
@@ -826,7 +827,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
       tf.logging.info("Writing example %d of %d" % (ex_index, len(examples)))
 
     feature = convert_single_example(ex_index, example, label_list,
-                                     max_seq_length, tokenizer)
+                                     max_seq_length, tokenizer, n_labels)
 
     features.append(feature)
   return features
