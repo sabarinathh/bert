@@ -166,15 +166,16 @@ class InputFeatures(object):
                  input_ids,
                  input_mask,
                  segment_ids,
-                 label_ids,
+                 label_id,
+                 sample_weight,
                  is_real_example=True,
-                 sample_weight=1.0):
+                 ):
         self.input_ids = input_ids
         self.input_mask = input_mask
         self.segment_ids = segment_ids
-        self.label_ids = label_ids
-        self.is_real_example = is_real_example
+        self.label_id = label_id
         self.sample_weight = sample_weight
+        self.is_real_example = is_real_example
 
 
 class DataProcessor(object):
@@ -240,7 +241,7 @@ class ToxicityProcessor(DataProcessor):
             if set_type == "test":
                 text_a = tokenization.convert_to_unicode(line[1])
                 label = "0"
-                sample_weight = "1"
+                sample_weight = "1.0"
             else:
                 text_a = tokenization.convert_to_unicode(line[1])
                 label = tokenization.convert_to_unicode(line[2])
@@ -251,7 +252,7 @@ class ToxicityProcessor(DataProcessor):
 
 
 def convert_single_example(ex_index, example, label_list, max_seq_length,
-                           tokenizer, n_labels):
+                           tokenizer):
     """Converts a single `InputExample` into a single `InputFeatures`."""
 
     if isinstance(example, PaddingInputExample):
@@ -259,9 +260,9 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
             input_ids=[0] * max_seq_length,
             input_mask=[0] * max_seq_length,
             segment_ids=[0] * max_seq_length,
-            label_ids=[0] * n_labels,
-            is_real_example=False,
-            sample_weight=1)
+            label_id=0,
+            sample_weight=1.0,
+            is_real_example=False)
 
     label_map = {}
     for (i, label) in enumerate(label_list):
@@ -333,7 +334,7 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
     assert len(input_mask) == max_seq_length
     assert len(segment_ids) == max_seq_length
 
-    label_ids = [label_map[_label] for _label in example.label.split(',')]
+    label_id = label_map[example.label]
     sample_weight = float(example.sample_weight)
     if ex_index < 5:
         tf.logging.info("*** Example ***")
@@ -343,21 +344,21 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
         tf.logging.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
         tf.logging.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
         tf.logging.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-        tf.logging.info("label_ids = %s" % " ".join([str(x) for x in label_ids]))
+        tf.logging.info("label: %s (id = %d)" % (example.label, label_id))
         tf.logging.info("sample_weight: %f" % sample_weight)
 
     feature = InputFeatures(
         input_ids=input_ids,
         input_mask=input_mask,
         segment_ids=segment_ids,
-        label_ids=label_ids,
-        is_real_example=True,
-        sample_weight=sample_weight)
+        label_id=label_id,
+        sample_weight=sample_weight,
+        is_real_example=True)
     return feature
 
 
 def file_based_convert_examples_to_features(
-        examples, label_list, max_seq_length, tokenizer, output_file, n_labels):
+        examples, label_list, max_seq_length, tokenizer, output_file):
     """Convert a set of `InputExample`s to a TFRecord file."""
 
     writer = tf.python_io.TFRecordWriter(output_file)
@@ -367,17 +368,22 @@ def file_based_convert_examples_to_features(
             tf.logging.info("Writing example %d of %d" % (ex_index, len(examples)))
 
         feature = convert_single_example(ex_index, example, label_list,
-                                         max_seq_length, tokenizer, n_labels)
+                                         max_seq_length, tokenizer)
 
         def create_int_feature(values):
             f = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
+            return f
+
+        def create_float_feature(values):
+            f = tf.train.Feature(float_list=tf.train.FloatList(value=list(values)))
             return f
 
         features = collections.OrderedDict()
         features["input_ids"] = create_int_feature(feature.input_ids)
         features["input_mask"] = create_int_feature(feature.input_mask)
         features["segment_ids"] = create_int_feature(feature.segment_ids)
-        features["label_ids"] = create_int_feature([feature.label_ids])
+        features["label_ids"] = create_int_feature([feature.label_id])
+        features["sample_weight"] = create_float_feature([feature.sample_weight])
         features["is_real_example"] = create_int_feature(
             [int(feature.is_real_example)])
 
@@ -387,14 +393,15 @@ def file_based_convert_examples_to_features(
 
 
 def file_based_input_fn_builder(input_file, seq_length, is_training,
-                                drop_remainder, n_labels):
+                                drop_remainder):
     """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
     name_to_features = {
         "input_ids": tf.FixedLenFeature([seq_length], tf.int64),
         "input_mask": tf.FixedLenFeature([seq_length], tf.int64),
         "segment_ids": tf.FixedLenFeature([seq_length], tf.int64),
-        "label_ids": tf.FixedLenFeature([n_labels], tf.int64),
+        "label_ids": tf.FixedLenFeature([], tf.int64),
+        "sample_weight": tf.FixedLenFeature([], tf.float32),
         "is_real_example": tf.FixedLenFeature([], tf.int64),
     }
 
@@ -452,7 +459,7 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
 
 
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
-                 labels, num_labels, use_one_hot_embeddings, sample_weights):
+                 labels, num_labels, use_one_hot_embeddings, sample_weight):
     """Creates a classification model."""
     model = modeling.BertModel(
         config=bert_config,
@@ -485,11 +492,13 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
         logits = tf.matmul(output_layer, output_weights, transpose_b=True)
         logits = tf.nn.bias_add(logits, output_bias)
-        probabilities = tf.nn.sigmoid(logits)
-        log_probs = tf.log(logits)
+        probabilities = tf.nn.softmax(logits, axis=-1)
+        log_probs = tf.nn.log_softmax(logits, axis=-1)
 
-        per_example_loss = -tf.reduce_sum(labels * probabilities, axis=-1)
-        per_example_loss = per_example_loss * sample_weights
+        one_hot_labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)
+
+        per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
+        per_example_loss = per_example_loss * sample_weight
         loss = tf.reduce_mean(per_example_loss)
 
         return (loss, per_example_loss, logits, probabilities)
@@ -511,7 +520,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
         input_mask = features["input_mask"]
         segment_ids = features["segment_ids"]
         label_ids = features["label_ids"]
-        sample_weights = features["sample_weights"]
+        sample_weight = features["sample_weight"]
         is_real_example = None
         if "is_real_example" in features:
             is_real_example = tf.cast(features["is_real_example"], dtype=tf.float32)
@@ -522,7 +531,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
         (total_loss, per_example_loss, logits, probabilities) = create_model(
             bert_config, is_training, input_ids, input_mask, segment_ids, label_ids,
-            num_labels, use_one_hot_embeddings, sample_weights)
+            num_labels, use_one_hot_embeddings, sample_weight)
 
         tvars = tf.trainable_variables()
         initialized_variable_names = {}
@@ -590,21 +599,19 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
 # This function is not used by this file but is still used by the Colab and
 # people who depend on it.
-def input_fn_builder(features, seq_length, is_training, drop_remainder, n_labels):
+def input_fn_builder(features, seq_length, is_training, drop_remainder):
     """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
     all_input_ids = []
     all_input_mask = []
     all_segment_ids = []
     all_label_ids = []
-    all_sample_weights = []
 
     for feature in features:
         all_input_ids.append(feature.input_ids)
         all_input_mask.append(feature.input_mask)
         all_segment_ids.append(feature.segment_ids)
         all_label_ids.append(feature.label_id)
-        all_sample_weights.append(feature.sample_weight)
 
     def input_fn(params):
         """The actual input function."""
@@ -631,9 +638,7 @@ def input_fn_builder(features, seq_length, is_training, drop_remainder, n_labels
                     shape=[num_examples, seq_length],
                     dtype=tf.int32),
             "label_ids":
-                tf.constant(all_label_ids, shape=[num_examples, n_labels], dtype=tf.int32),
-            "sample_weights":
-                tf.constant(all_sample_weights, shape=[num_examples], dtype=tf.float32)
+                tf.constant(all_label_ids, shape=[num_examples], dtype=tf.int32),
         })
 
         if is_training:
@@ -649,7 +654,7 @@ def input_fn_builder(features, seq_length, is_training, drop_remainder, n_labels
 # This function is not used by this file but is still used by the Colab and
 # people who depend on it.
 def convert_examples_to_features(examples, label_list, max_seq_length,
-                                 tokenizer, n_labels):
+                                 tokenizer):
     """Convert a set of `InputExample`s to a list of `InputFeatures`."""
 
     features = []
@@ -658,7 +663,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
             tf.logging.info("Writing example %d of %d" % (ex_index, len(examples)))
 
         feature = convert_single_example(ex_index, example, label_list,
-                                         max_seq_length, tokenizer, n_labels)
+                                         max_seq_length, tokenizer)
 
         features.append(feature)
     return features
